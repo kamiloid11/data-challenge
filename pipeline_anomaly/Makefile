@@ -1,10 +1,12 @@
-POETRY := $(shell which poetry)
-PYTHON=$(POETRY) run python
+PYTHON := python
+PIP := $(PYTHON) -m pip
 
-.PHONY: install infra-up infra-down pipeline test format lint
+.PHONY: install infra-up infra-down pipeline pipeline-% test format lint
 
 install:
-	$(POETRY) install --no-root
+	$(PIP) install --upgrade pip setuptools wheel
+	$(PIP) install -r requirements.txt
+	$(PIP) install -e .
 
 infra-up:
 	docker compose up -d
@@ -13,10 +15,10 @@ infra-down:
 	docker compose down -v
 
 pipeline:
-	$(PYTHON) -m pipeline_anomaly.presentation.cli run --config config/pipeline.yaml
+	$(PYTHON) -m pipeline.runner run --config config/pipeline.yaml
 
 pipeline-%:
-	$(PYTHON) -m pipeline_anomaly.presentation.cli run --config config/$*.yaml
+	$(PYTHON) -m pipeline.runner run --config config/$*.yaml
 
 test:
-	$(POETRY) run pytest
+	$(PYTHON) -m pytest -q
