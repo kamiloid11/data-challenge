@@ -6,8 +6,6 @@ build-backend = "setuptools.build_meta"
 name = "pipeline-anomaly"
 version = "0.1.0"
 
-
-
 [tool.setuptools]
 package-dir = {"" = "src"}
 
