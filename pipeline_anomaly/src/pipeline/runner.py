@@ -7,10 +7,11 @@ import shutil
 import glob
 from pathlib import Path
 from typing import Optional
+
 from .etl import extract_from_csv, transform, load
 from .db import write_timeseries
 from .anomaly import detect_anomalies, anomaly_stats
-from .config import settings
+from .config import settings, load_pipeline_config
 
 settings.clickhouse_host = os.environ.get("CLICKHOUSE_HOST", settings.clickhouse_host)
 
@@ -30,16 +31,20 @@ def _make_dirs(path: str):
 def process_file(csv_path: str, archive_dir: Optional[str] = None):
     start = time.time()
     logger.info("Processing file: %s", csv_path)
+
     df = extract_from_csv(csv_path)
     df = transform(df)
     df = detect_anomalies(df)
+
     stats = anomaly_stats(df)
     duration_ms = int((time.time() - start) * 1000)
     rows = len(df)
 
     logger.info('Anomaly stats: %s', stats)
-    logger.info('rows_processed=%d anomalies=%d anomaly_rate=%.4f duration_ms=%d',
-                rows, stats.get('anomalies', 0), stats.get('anomaly_rate', 0.0), duration_ms)
+    logger.info(
+        'rows_processed=%d anomalies=%d anomaly_rate=%.4f duration_ms=%d',
+        rows, stats.get('anomalies', 0), stats.get('anomaly_rate', 0.0), duration_ms
+    )
 
     metrics = {
         "file": os.path.basename(csv_path),
@@ -47,7 +52,7 @@ def process_file(csv_path: str, archive_dir: Optional[str] = None):
         "anomalies": stats.get("anomalies", 0),
         "anomaly_rate": stats.get("anomaly_rate", 0.0),
         "duration_ms": duration_ms,
-        "timestamp": int(time.time())
+        "timestamp": int(time.time()),
     }
 
     print(json.dumps({"pipeline_metrics": metrics}, ensure_ascii=False))
@@ -77,7 +82,6 @@ def process_file(csv_path: str, archive_dir: Optional[str] = None):
 
 def run_once(csv_path: str):
     if os.path.isdir(csv_path):
-
         files = sorted(glob.glob(os.path.join(csv_path, "*.csv")))
         if not files:
             logger.info("No CSV files found in %s", csv_path)
@@ -90,6 +94,7 @@ def run_once(csv_path: str):
 
 def watch_directory(incoming_dir: str, archive_dir: str, poll_interval: int = 5):
     logger.info("Starting watch mode: incoming=%s archive=%s interval=%ds", incoming_dir, archive_dir, poll_interval)
+
     _make_dirs(incoming_dir)
     _make_dirs(archive_dir)
 
@@ -107,6 +112,7 @@ def watch_directory(incoming_dir: str, archive_dir: str, poll_interval: int = 5)
             if not files:
                 time.sleep(poll_interval)
                 continue
+
             for f in files:
                 try:
                     process_file(f, archive_dir=archive_dir)
@@ -114,22 +120,61 @@ def watch_directory(incoming_dir: str, archive_dir: str, poll_interval: int = 5)
                     logger.exception("Error processing file %s", f)
 
             time.sleep(0.5)
+
     except KeyboardInterrupt:
         logger.info("Watch mode stopped by user")
+
+
+def _apply_yaml_to_settings(cfg):
+    """
+    Применяем поля YAML верхнего уровня к settings.
+    Например:
+        clickhouse.host -> settings.clickhouse_host
+    """
+    raw = cfg.raw
+
+    if not isinstance(raw, dict):
+        return
+
+    # simple keys apply directly
+    for key, value in raw.items():
+        # detectors / sinks не пишем в settings
+        if key in ("detectors", "sinks", "window"):
+            continue
+
+        if isinstance(value, dict):
+            # nested keys: clickhouse.host -> settings.clickhouse_host
+            for k2, v2 in value.items():
+                flat_key = f"{key}_{k2}"
+                setattr(settings, flat_key, v2)
+        else:
+            setattr(settings, key, value)
 
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('cmd', choices=['run', 'watch'], help='command: run (one-off) or watch (daemon)')
-    parser.add_argument('--csv', default='/app/data/sample.csv', help='input CSV file or directory (for run)')
+    parser.add_argument('--config', help='Path to YAML config file')
+    parser.add_argument('--csv', default='data/sample.csv', help='input CSV file or directory (for run)')
     parser.add_argument('--incoming-dir', default='/app/data/incoming', help='incoming directory for watch mode')
-    parser.add_argument('--archive-dir', default='/app/data/processed',
-                        help='archive directory for processed files (watch mode)')
+    parser.add_argument('--archive-dir', default='/app/data/processed', help='archive directory (watch mode)')
     parser.add_argument('--interval', type=int, default=5, help='poll interval seconds for watch mode')
+
     args = parser.parse_args()
+
+    # ----- YAML CONFIG PROCESSING -----
+    if args.config:
+        cfg = load_pipeline_config(args.config)
+        if cfg.raw:
+            logger.info("Loaded config from %s", args.config)
+            _apply_yaml_to_settings(cfg)
+        else:
+            logger.warning("Config %s is empty or failed to load", args.config)
+    # ----------------------------------
 
     if args.cmd == 'run':
         run_once(args.csv)
+
     elif args.cmd == 'watch':
         watch_directory(args.incoming_dir, args.archive_dir, poll_interval=args.interval)
 
